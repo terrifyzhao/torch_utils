@@ -1,7 +1,7 @@
 import torch
 import time
-from torchtext import data, datasets
-import jieba
+import numpy as np
+import six
 
 
 class TrainHandler:
@@ -86,23 +86,122 @@ class TrainHandler:
             print(f'\tLoss: {valid_loss:.4f}(valid)\t|\tAcc: {valid_acc * 100:.1f}%(valid)')
 
 
-class TextProcess:
-    def __init__(self):
-        def tokenizer(text):
-            return list(jieba.cut(text))
+def torch_text_process():
+    from torchtext import data
 
-        TEXT = data.Field(sequential=True, tokenize=tokenizer, lower=True, fix_length=20)
-        LABEL = data.Field(sequential=False, use_vocab=False)
-        all_dataset = data.TabularDataset.splits(path='',
-                                                 train='LCQMC.csv',
-                                                 format='csv',
-                                                 fields=[('sentence1', TEXT), ('sentence2', TEXT), ('label', LABEL)])[0]
-        TEXT.build_vocab(all_dataset)
-        train, valid = all_dataset.split(0.1)
-        (train_iter, valid_iter) = data.BucketIterator.splits(datasets=(train, valid),
-                                                              batch_sizes=(64, 128),
-                                                              sort_key=lambda x: len(x.sentence1))
+    def tokenizer(text):
+        import jieba
+        return list(jieba.cut(text))
+
+    TEXT = data.Field(sequential=True, tokenize=tokenizer, lower=True, fix_length=20)
+    LABEL = data.Field(sequential=False, use_vocab=False)
+    all_dataset = data.TabularDataset.splits(path='',
+                                             train='LCQMC.csv',
+                                             format='csv',
+                                             fields=[('sentence1', TEXT), ('sentence2', TEXT), ('label', LABEL)])[0]
+    TEXT.build_vocab(all_dataset)
+    train, valid = all_dataset.split(0.1)
+    (train_iter, valid_iter) = data.BucketIterator.splits(datasets=(train, valid),
+                                                          batch_sizes=(64, 128),
+                                                          sort_key=lambda x: len(x.sentence1))
+    return train_iter, valid_iter
+
+
+def pad_sequences(sequences, maxlen=None, dtype='int32',
+                  padding='post', truncating='pre', value=0.):
+    """Pads sequences to the same length.
+
+    This function transforms a list of
+    `num_samples` sequences (lists of integers)
+    into a 2D Numpy array of shape `(num_samples, num_timesteps)`.
+    `num_timesteps` is either the `maxlen` argument if provided,
+    or the length of the longest sequence otherwise.
+
+    Sequences that are shorter than `num_timesteps`
+    are padded with `value` at the end.
+
+    Sequences longer than `num_timesteps` are truncated
+    so that they fit the desired length.
+    The position where padding or truncation happens is determined by
+    the arguments `padding` and `truncating`, respectively.
+
+    Pre-padding is the default.
+
+    # Arguments
+        sequences: List of lists, where each element is a sequence.
+        maxlen: Int, maximum length of all sequences.
+        dtype: Type of the output sequences.
+            To pad sequences with variable length strings, you can use `object`.
+        padding: String, 'pre' or 'post':
+            pad either before or after each sequence.
+        truncating: String, 'pre' or 'post':
+            remove values from sequences larger than
+            `maxlen`, either at the beginning or at the end of the sequences.
+        value: Float or String, padding value.
+
+    # Returns
+        x: Numpy array with shape `(len(sequences), maxlen)`
+
+    # Raises
+        ValueError: In case of invalid values for `truncating` or `padding`,
+            or in case of invalid shape for a `sequences` entry.
+    """
+    if not hasattr(sequences, '__len__'):
+        raise ValueError('`sequences` must be iterable.')
+    num_samples = len(sequences)
+
+    lengths = []
+    for x in sequences:
+        try:
+            lengths.append(len(x))
+        except TypeError:
+            raise ValueError('`sequences` must be a list of iterables. '
+                             'Found non-iterable: ' + str(x))
+
+    if maxlen is None:
+        maxlen = np.max(lengths)
+
+    # take the sample shape from the first non empty sequence
+    # checking for consistency in the main loop below.
+    sample_shape = tuple()
+    for s in sequences:
+        if len(s) > 0:
+            sample_shape = np.asarray(s).shape[1:]
+            break
+
+    is_dtype_str = np.issubdtype(dtype, np.str_) or np.issubdtype(dtype, np.unicode_)
+    if isinstance(value, six.string_types) and dtype != object and not is_dtype_str:
+        raise ValueError("`dtype` {} is not compatible with `value`'s type: {}\n"
+                         "You should set `dtype=object` for variable length strings."
+                         .format(dtype, type(value)))
+
+    x = np.full((num_samples, maxlen) + sample_shape, value, dtype=dtype)
+    for idx, s in enumerate(sequences):
+        if not len(s):
+            continue  # empty list/array was found
+        if truncating == 'pre':
+            trunc = s[-maxlen:]
+        elif truncating == 'post':
+            trunc = s[:maxlen]
+        else:
+            raise ValueError('Truncating type "%s" '
+                             'not understood' % truncating)
+
+        # check `trunc` has expected shape
+        trunc = np.asarray(trunc, dtype=dtype)
+        if trunc.shape[1:] != sample_shape:
+            raise ValueError('Shape of sample %s of sequence at position %s '
+                             'is different from expected shape %s' %
+                             (trunc.shape[1:], idx, sample_shape))
+
+        if padding == 'post':
+            x[idx, :len(trunc)] = trunc
+        elif padding == 'pre':
+            x[idx, -len(trunc):] = trunc
+        else:
+            raise ValueError('Padding type "%s" not understood' % padding)
+    return x
 
 
 if __name__ == '__main__':
-    TextProcess()
+    torch_text_process()
